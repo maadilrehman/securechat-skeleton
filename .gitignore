@@ -33,3 +33,9 @@ transcripts/       # runtime transcripts/receipts
 .env
 .env.*
 *.pem              # any str*
+"certs/"          
+"transcripts/"    
+".env"            
+"*.pcapng"        
+"__pycache__/"    
+".venv/"          
