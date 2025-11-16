@@ -1,0 +1,7 @@
+# Secrets and local certs
+certs/
+transcripts/
+.env
+*.key.pem
+*.key
+*.pem
