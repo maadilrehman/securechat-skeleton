@@ -1,9 +1,15 @@
 # client/messenger.py
+# ==== FIX IMPORTS – ADD PROJECT ROOT TO PATH ====
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# ================================================
+
 import json, base64, time, os
 from pathlib import Path
 from crypto.aes_utils import aes_encrypt_cbc
 from crypto.rsa_utils import load_private_key, sign_bytes_rsa
-from crypto.dh_utils import derive_aes_key_from_ks  # you will supply K from session
+from crypto.dh_utils import derive_aes_key_from_ks
 
 TRANSCRIPTS_DIR = Path("transcripts")
 TRANSCRIPTS_DIR.mkdir(exist_ok=True)
@@ -14,8 +20,9 @@ class ClientMessenger:
         self.priv = load_private_key(privkey_path)
         self.seqno = 0
         self.transcript_file = TRANSCRIPTS_DIR / "client_transcript.txt"
-        # open file in append mode
         self.tf = open(self.transcript_file, "ab")
+        # store fingerprint on the instance
+        self.peer_cert_fingerprint = peer_cert_fingerprint
 
     def _make_msg(self, plaintext: str) -> dict:
         self.seqno += 1
@@ -40,7 +47,7 @@ class ClientMessenger:
             "sig": base64.b64encode(sig).decode()
         }
         # append transcript line: seqno | ts | ct_base64 | sig_base64 | peer-fingerprint
-        line = f"{self.seqno}|{ts}|{payload['ct']}|{payload['sig']}|{peer_cert_fingerprint}\n".encode('utf-8')
+        line = f"{self.seqno}|{ts}|{payload['ct']}|{payload['sig']}|{self.peer_cert_fingerprint}\n".encode('utf-8')
         self.tf.write(line)
         self.tf.flush()
         return payload
