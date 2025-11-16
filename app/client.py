@@ -201,6 +201,10 @@ def handle_chat_loop(sock: socket.socket, session_key: bytes, client_key):
             
             # 3. Sign the hash [cite: 207]
             signature = sign.sign_data(client_key, data_hash_bytes)
+
+            # --- ADD THIS LINE TO CORRUPT THE SIGNATURE ---
+            #signature = signature[:-1] + b'X'
+            
             
             # 4. Create and send message
             msg = protocol.Msg(
