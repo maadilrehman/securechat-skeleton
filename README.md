@@ -46,6 +46,24 @@ securechat-skeleton/
 └─ .github/workflows/ci.yml  # Compile-only sanity check (no execution)
 ```
 
+
+
+
+### PKI - generate CA and certs (local)
+
+# Run (Windows PowerShell):
+.venv\Scripts\Activate.ps1
+python scripts/gen_ca.py
+python scripts/gen_cert.py --name server --cn "localhost"
+python scripts/gen_cert.py --name client --cn "client.local"
+
+Generated certs are in certs/ (ignored by git).
+
+
+
+
+
+
 ## ⚙️ Setup Instructions
 
 1. **Fork this repository** to your own GitHub account(using official nu email).  
