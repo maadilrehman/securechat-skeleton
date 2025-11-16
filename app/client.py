@@ -191,7 +191,7 @@ def handle_chat_loop(sock: socket.socket, session_key: bytes, client_key):
             plaintext_bytes = message.encode('utf-8')
             ct_bytes = aes.encrypt(session_key, plaintext_bytes)
             
-            # 2. Compute hash h = SHA256(seqno || ts || ct)
+            # 2. Compute hash h = SHA256(seqno || ts || ct) [cite: 206]
             ts = utils.now_ms()
             digest = hashes.Hash(hashes.SHA256())
             digest.update(str(seqno).encode('utf-8'))
@@ -199,7 +199,7 @@ def handle_chat_loop(sock: socket.socket, session_key: bytes, client_key):
             digest.update(ct_bytes)
             data_hash_bytes = digest.finalize()
             
-            # 3. Sign the hash
+            # 3. Sign the hash [cite: 207]
             signature = sign.sign_data(client_key, data_hash_bytes)
             
             # 4. Create and send message
@@ -211,7 +211,7 @@ def handle_chat_loop(sock: socket.socket, session_key: bytes, client_key):
             )
             send_message(sock, msg)
             
-            # 5. Add to transcript
+            # 5. Add to transcript [cite: 224]
             session_log.add_message(
                 seqno, ts, msg.ct, msg.sig,
                 "server_fingerprint_todo"
@@ -222,11 +222,37 @@ def handle_chat_loop(sock: socket.socket, session_key: bytes, client_key):
             # (In a real client, a separate thread would listen for messages)
             
     except KeyboardInterrupt:
-        pass
+        pass # User pressed Ctrl+C
+    except Exception as e:
+        print(f"\n[ERROR] Error in chat: {e}")
     finally:
         print("\n[+] Closing chat.")
-        final_hash = session_log.get_transcript_hash()
-        print(f"[+] Final Transcript Hash: {final_hash}")
+        # --- NEW CODE FOR PHASE 6 ---
+        try:
+            # 6. Generate final transcript hash [cite: 226]
+            final_hash = session_log.get_transcript_hash()
+            print(f"[+] Final Transcript Hash: {final_hash}")
+
+            # 7. Sign the hash [cite: 227]
+            hash_bytes = bytes.fromhex(final_hash)
+            signature = sign.sign_data(client_key, hash_bytes)
+
+            # 8. Create and save the SessionReceipt [cite: 228-230]
+            receipt = protocol.Receipt(
+                peer="client",
+                first_seq=session_log.first_seq,
+                last_seq=session_log.last_seq,
+                transcript_sha256=final_hash,
+                sig=utils.to_base64(signature)
+            )
+
+            receipt_path = f"{session_log.filepath}_RECEIPT.json"
+            with open(receipt_path, "w") as f:
+                f.write(receipt.model_dump_json(indent=2))
+            print(f"[+] Saved SessionReceipt to {receipt_path}")
+
+        except Exception as e:
+            print(f"[+] !! FAILED to generate receipt: {e} !!")
 
 
 # --- Main Client ---
@@ -240,6 +266,11 @@ def main():
     client_cert, client_key = pki.load_entity_creds(
         "certs/client_cert.pem", 
         "certs/client_key.pem"
+
+        #To test for bad certificates just comment out below code and comment the above code 
+
+        #"bad_client_cert.pem",
+        #"bad_client_key.pem"
     )
     
     try:

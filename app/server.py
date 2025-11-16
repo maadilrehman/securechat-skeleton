@@ -180,7 +180,7 @@ def perform_main_dh_exchange(conn: socket.socket, addr) -> bytes:
     return session_aes_key
     
 
-def handle_chat_loop(conn: socket.socket, addr, session_key: bytes, client_cert: x509.Certificate):
+def handle_chat_loop(conn: socket.socket, addr, session_key: bytes, client_cert: x509.Certificate, server_key): # Added server_key
     """
     Handles the main encrypted chat.
     Implements Section 2.4.
@@ -191,63 +191,85 @@ def handle_chat_loop(conn: socket.socket, addr, session_key: bytes, client_cert:
     
     last_seen_seqno = -1
     
-    while True:
+    try:
+        while True:
+            try:
+                msg_data = recv_message(conn)
+                if not msg_data:
+                    print(f"[{addr}] Client disconnected.")
+                    break
+                    
+                if msg_data.get('type') != 'msg':
+                    print(f"[{addr}] Received non-msg. Exiting chat loop.")
+                    break
+                
+                msg = protocol.Msg(**msg_data)
+                
+                # 1. Check sequence number (replay protection)
+                if msg.seqno <= last_seen_seqno: # [cite: 212]
+                    print(f"[{addr}] !! REPLAY (seqno {msg.seqno}) !!")
+                    continue # Drop the message
+                last_seen_seqno = msg.seqno
+                
+                # 2. Re-compute hash h = SHA256(seqno || ts || ct) [cite: 206]
+                ct_bytes = utils.from_base64(msg.ct)
+                
+                digest = hashes.Hash(hashes.SHA256())
+                digest.update(str(msg.seqno).encode('utf-8'))
+                digest.update(str(msg.ts).encode('utf-8'))
+                digest.update(ct_bytes)
+                data_hash_bytes = digest.finalize()
+                
+                # 3. Verify signature [cite: 213]
+                signature = utils.from_base64(msg.sig)
+                
+                if not sign.verify_signature(client_pub_key, signature, data_hash_bytes):
+                    print(f"[{addr}] !! SIG_FAIL: Invalid signature on message {msg.seqno} !!")
+                    continue # Drop the message
+                    
+                # 4. Decrypt ciphertext [cite: 214]
+                plaintext = aes.decrypt(session_key, ct_bytes)
+                
+                print(f"[{CLIENT_CN}]: {plaintext.decode('utf-8')}")
+                
+                # 5. Add to transcript [cite: 224]
+                session_log.add_message(
+                    msg.seqno, msg.ts, msg.ct, msg.sig, 
+                    "client_fingerprint_todo" # TODO: Add cert fingerprint
+                )
+                
+            except Exception as e:
+                print(f"[{addr}] Error in chat loop: {e}")
+                break
+                
+    finally:
+        print(f"[{addr}] Chat loop ended.")
+        # --- NEW CODE FOR PHASE 6 ---
         try:
-            msg_data = recv_message(conn)
-            if not msg_data:
-                print(f"[{addr}] Client disconnected.")
-                break
-                
-            if msg_data.get('type') != 'msg':
-                print(f"[{addr}] Received non-msg. Exiting chat loop.")
-                break
+            # 6. Generate final transcript hash [cite: 226]
+            final_hash = session_log.get_transcript_hash()
+            print(f"[{addr}] Final Transcript Hash: {final_hash}")
             
-            msg = protocol.Msg(**msg_data)
+            # 7. Sign the hash [cite: 227]
+            hash_bytes = bytes.fromhex(final_hash)
+            signature = sign.sign_data(server_key, hash_bytes)
             
-            # 1. Check sequence number (replay protection)
-            if msg.seqno <= last_seen_seqno:
-                print(f"[{addr}] !! REPLAY (seqno {msg.seqno}) !!")
-                continue # Drop the message
-            last_seen_seqno = msg.seqno
-            
-            # 2. Re-compute hash h = SHA256(seqno || ts || ct)
-            ct_bytes = utils.from_base64(msg.ct)
-            
-            digest = hashes.Hash(hashes.SHA256())
-            digest.update(str(msg.seqno).encode('utf-8'))
-            digest.update(str(msg.ts).encode('utf-8'))
-            digest.update(ct_bytes)
-            data_hash_bytes = digest.finalize()
-            
-            # 3. Verify signature
-            signature = utils.from_base64(msg.sig)
-            
-            if not sign.verify_signature(client_pub_key, signature, data_hash_bytes):
-                print(f"[{addr}] !! SIG_FAIL: Invalid signature on message {msg.seqno} !!")
-                continue # Drop the message
-                
-            # 4. Decrypt ciphertext
-            plaintext = aes.decrypt(session_key, ct_bytes)
-            
-            print(f"[{CLIENT_CN}]: {plaintext.decode('utf-8')}")
-            
-            # 5. Add to transcript
-            session_log.add_message(
-                msg.seqno, msg.ts, msg.ct, msg.sig, 
-                "client_fingerprint_todo" # TODO: Add cert fingerprint
+            # 8. Create and save the SessionReceipt [cite: 228-230]
+            receipt = protocol.Receipt(
+                peer="server",
+                first_seq=session_log.first_seq,
+                last_seq=session_log.last_seq,
+                transcript_sha256=final_hash,
+                sig=utils.to_base64(signature)
             )
             
-            # (Server doesn't send messages in this simplified loop)
+            receipt_path = f"{session_log.filepath}_RECEIPT.json"
+            with open(receipt_path, "w") as f:
+                f.write(receipt.model_dump_json(indent=2))
+            print(f"[{addr}] Saved SessionReceipt to {receipt_path}")
             
         except Exception as e:
-            print(f"[{addr}] Error in chat loop: {e}")
-            break
-            
-    print(f"[{addr}] Chat loop ended.")
-    # 6. Generate final transcript hash
-    final_hash = session_log.get_transcript_hash()
-    print(f"[{addr}] Final Transcript Hash: {final_hash}")
-    # (In a full implementation, we'd sign this and create a receipt)
+            print(f"[{addr}] !! FAILED to generate receipt: {e} !!")
 
 
 # --- Main Client Handler ---
@@ -273,7 +295,7 @@ def handle_client(conn: socket.socket, addr, ca_cert, server_cert, server_key):
         session_key = perform_main_dh_exchange(conn, addr)
         
         # Phase 5: Chat Loop
-        handle_chat_loop(conn, addr, session_key, client_cert)
+        handle_chat_loop(conn, addr, session_key, client_cert, server_key)
         
     except Exception as e:
         print(f"[{addr}] Error: {e}")
