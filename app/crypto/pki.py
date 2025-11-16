@@ -18,13 +18,21 @@ def load_ca_cert(path="certs/ca_cert.pem"):
         sys.exit(1)
 
 def load_entity_creds(cert_path, key_path):
-    """Loads an entity's (client/server) certificate and private key."""
+    """
+    Loads an entity's (client/server) certificate and optionally its private key.
+    """
     try:
+        # --- THIS IS THE FIX ---
+        # Everyone needs a certificate
         with open(cert_path, "rb") as f:
             cert = x509.load_pem_x509_certificate(f.read())
             
-        with open(key_path, "rb") as f:
-            key = serialization.load_pem_private_key(f.read(), password=None)
+        key = None
+        # Only load the key if a key_path was given
+        if key_path is not None:
+            with open(key_path, "rb") as f:
+                key = serialization.load_pem_private_key(f.read(), password=None)
+        # --- END FIX ---
             
         return cert, key
     except Exception as e:
@@ -44,20 +52,14 @@ def deserialize_cert(cert_pem):
 def validate_certificate(cert_to_validate, ca_cert, expected_cn=None):
     """
     Validates a received certificate.
-    
-    This function performs all checks required by Section 2.1:
-    1. Signature chain validity (is it signed by our CA?)
-    2. Expiry date and validity period
-    3. Common Name (CN) match (if provided)
     """
     
     # 1. Check Signature
-    # We use the CA's public key to verify the certificate's signature.
     try:
         ca_cert.public_key().verify(
             cert_to_validate.signature,
             cert_to_validate.tbs_certificate_bytes,
-            padding.PKCS1v15(), # Standard for X.509
+            padding.PKCS1v15(), 
             cert_to_validate.signature_hash_algorithm,
         )
         print("PKI: Certificate signature is valid.")
@@ -80,7 +82,6 @@ def validate_certificate(cert_to_validate, ca_cert, expected_cn=None):
         
     # 3. Check Common Name (CN)
     if expected_cn:
-        # Extract CN from the certificate's subject
         cn_attributes = cert_to_validate.subject.get_attributes_for_oid(
             x509.NameOID.COMMON_NAME
         )

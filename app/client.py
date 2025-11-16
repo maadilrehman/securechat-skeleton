@@ -215,7 +215,7 @@ def handle_chat_loop(sock: socket.socket, session_key: bytes, client_key):
             )
             send_message(sock, msg)
             # --- ADD THIS LINE TO REPLAY THE MESSAGE ---
-            send_message(sock, msg)
+            #send_message(sock, msg)
             
             
             # 5. Add to transcript [cite: 224]
