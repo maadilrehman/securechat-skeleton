@@ -214,6 +214,9 @@ def handle_chat_loop(sock: socket.socket, session_key: bytes, client_key):
                 sig=utils.to_base64(signature)
             )
             send_message(sock, msg)
+            # --- ADD THIS LINE TO REPLAY THE MESSAGE ---
+            send_message(sock, msg)
+            
             
             # 5. Add to transcript [cite: 224]
             session_log.add_message(
