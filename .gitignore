@@ -6,3 +6,5 @@ venv/
 # Assignment Secrets
 certs/
 .env
+
+transcripts/
