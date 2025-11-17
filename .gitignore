@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.local
+
+# certs and keys
+certs/
+*.pem
+*.key
+*.crt
+
+# DB dumps
+*.sql
+*.sql.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
