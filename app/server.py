@@ -2,9 +2,10 @@ import socket
 import json
 import os
 import hashlib
+import time
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import dh
+from cryptography.hazmat.primitives.asymmetric import dh, padding as asym_padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 from cryptography.hazmat.backends import default_backend
@@ -37,64 +38,61 @@ def load_certificates():
         server_key = serialization.load_pem_private_key(f.read(), password=None)
     return ca_cert, server_cert, server_key
 
-# Validate client certificate
+# Validate certificate
 def validate_certificate(cert_pem, ca_cert):
     try:
         cert = x509.load_pem_x509_certificate(cert_pem.encode())
-        
-        # Check expiry
-        now = datetime.utcnow()
-        if cert.not_valid_before > now or cert.not_valid_after < now:
+        now = datetime.now()
+        if cert.not_valid_before_utc.replace(tzinfo=None) > now or cert.not_valid_after_utc.replace(tzinfo=None) < now:
             print("❌ Certificate expired or not yet valid")
-            return False
-        
-        # Verify signature (simplified - in production, use proper chain validation)
-        # For now, just check if it's signed by our CA
+            return False, None
         print(f"✅ Client certificate validated: {cert.subject}")
-        return True
+        return True, cert
     except Exception as e:
         print(f"❌ Certificate validation failed: {e}")
-        return False
+        return False, None
 
 # Diffie-Hellman key exchange
 def perform_dh_server(client_socket):
-    # Receive DH params from client
     dh_msg = json.loads(client_socket.recv(4096).decode())
     p = dh_msg['p']
     g = dh_msg['g']
     A = dh_msg['A']
     
-    # Generate server's DH key pair
     params = dh.DHParameterNumbers(p, g).parameters(default_backend())
     server_private = params.generate_private_key()
     server_public = server_private.public_key().public_numbers().y
     
-    # Send server's public key
     client_socket.send(json.dumps({'type': 'dh_server', 'B': server_public}).encode())
     
-    # Compute shared secret
     shared_secret = pow(A, server_private.private_numbers().x, p)
-    
-    # Derive AES key
     key_hash = hashlib.sha256(shared_secret.to_bytes(256, 'big')).digest()
-    aes_key = key_hash[:16]  # Truncate to 128 bits
+    aes_key = key_hash[:16]
     
     return aes_key
 
-# AES decryption
+# AES decrypt
 def aes_decrypt(ciphertext, key):
     iv = ciphertext[:16]
     ct = ciphertext[16:]
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
     decryptor = cipher.decryptor()
     padded_data = decryptor.update(ct) + decryptor.finalize()
-    
-    # Remove PKCS7 padding
     unpadder = PKCS7(128).unpadder()
     data = unpadder.update(padded_data) + unpadder.finalize()
     return data
 
-# Handle registration
+# AES encrypt
+def aes_encrypt(plaintext, key):
+    iv = os.urandom(16)
+    padder = PKCS7(128).padder()
+    padded_data = padder.update(plaintext.encode()) + padder.finalize()
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+    return iv + ciphertext
+
+# Registration
 def handle_registration(data, conn):
     cursor = conn.cursor()
     try:
@@ -102,7 +100,6 @@ def handle_registration(data, conn):
         username = data['username']
         password = data['pwd']
         
-        # Generate salt and hash
         salt = os.urandom(16)
         pwd_hash = hashlib.sha256(salt + password.encode()).hexdigest()
         
@@ -121,7 +118,7 @@ def handle_registration(data, conn):
     finally:
         cursor.close()
 
-# Handle login
+# Login
 def handle_login(data, conn):
     cursor = conn.cursor()
     try:
@@ -147,8 +144,110 @@ def handle_login(data, conn):
     finally:
         cursor.close()
 
-# Main server loop
+# Verify message signature
+def verify_signature(message_data, signature, client_cert):
+    try:
+        # Reconstruct the signed data
+        signed_data = f"{message_data['seqno']}|{message_data['ts']}|{message_data['ct']}".encode()
+        digest = hashlib.sha256(signed_data).digest()
+        
+        # Verify signature
+        client_cert.public_key().verify(
+            signature,
+            digest,
+            asym_padding.PKCS1v15(),
+            hashes.SHA256()
+        )
+        return True
+    except Exception as e:
+        print(f"❌ Signature verification failed: {e}")
+        return False
+
+# Chat session
+def handle_chat_session(client_socket, session_key, client_cert, server_key, username):
+    print(f"\n💬 Chat session started with {username}")
+    
+    expected_seqno = 0
+    transcript = []
+    
+    try:
+        while True:
+            # Receive encrypted message
+            data = client_socket.recv(4096)
+            if not data:
+                break
+            
+            msg = json.loads(data.decode())
+            
+            if msg['type'] == 'msg':
+                # Verify sequence number (replay protection)
+                if msg['seqno'] != expected_seqno:
+                    print(f"❌ REPLAY: Expected seqno {expected_seqno}, got {msg['seqno']}")
+                    client_socket.send(json.dumps({'status': 'error', 'message': 'REPLAY'}).encode())
+                    continue
+                
+                # Verify signature
+                import base64
+                signature = base64.b64decode(msg['sig'])
+                if not verify_signature(msg, signature, client_cert):
+                    print("❌ SIG_FAIL: Invalid signature")
+                    client_socket.send(json.dumps({'status': 'error', 'message': 'SIG_FAIL'}).encode())
+                    continue
+                
+                # Decrypt message
+                ciphertext = base64.b64decode(msg['ct'])
+                plaintext = aes_decrypt(ciphertext, session_key).decode()
+                
+                print(f"📨 [{username}]: {plaintext}")
+                
+                # Log to transcript
+                transcript.append(f"{msg['seqno']}|{msg['ts']}|{msg['ct']}|{msg['sig']}")
+                
+                expected_seqno += 1
+                
+                # Echo back (server response)
+                response_text = f"Server received: {plaintext}"
+                response_ct = aes_encrypt(response_text, session_key)
+                response_ct_b64 = base64.b64encode(response_ct).decode()
+                
+                # Sign response
+                response_data = f"{expected_seqno}|{int(time.time() * 1000)}|{response_ct_b64}"
+                response_digest = hashlib.sha256(response_data.encode()).digest()
+                response_sig = server_key.sign(
+                    response_digest,
+                    asym_padding.PKCS1v15(),
+                    hashes.SHA256()
+                )
+                
+                response_msg = {
+                    'type': 'msg',
+                    'seqno': expected_seqno,
+                    'ts': int(time.time() * 1000),
+                    'ct': response_ct_b64,
+                    'sig': base64.b64encode(response_sig).decode()
+                }
+                
+                client_socket.send(json.dumps(response_msg).encode())
+                expected_seqno += 1
+                
+            elif msg['type'] == 'end_chat':
+                print("📴 Client ended chat session")
+                break
+                
+    except Exception as e:
+        print(f"❌ Chat error: {e}")
+    
+    # Save transcript
+    if transcript:
+        with open(f'transcripts/server_{username}_{int(time.time())}.txt', 'w') as f:
+            f.write('\n'.join(transcript))
+        print(f"✅ Transcript saved ({len(transcript)} messages)")
+    
+    print("💬 Chat session ended\n")
+
+# Main server
 def start_server():
+    os.makedirs('transcripts', exist_ok=True)
     ca_cert, server_cert, server_key = load_certificates()
     db_conn = get_db_connection()
     
@@ -165,42 +264,51 @@ def start_server():
         print(f"\n📞 Client connected from {addr}")
         
         try:
-            # Step 1: Certificate exchange
-            # Send server certificate
+            # Certificate exchange
             server_cert_pem = server_cert.public_bytes(serialization.Encoding.PEM).decode()
             client_socket.send(json.dumps({'type': 'server_hello', 'cert': server_cert_pem}).encode())
             
-            # Receive client certificate
             client_hello = json.loads(client_socket.recv(4096).decode())
-            if not validate_certificate(client_hello['cert'], ca_cert):
+            valid, client_cert = validate_certificate(client_hello['cert'], ca_cert)
+            if not valid:
                 client_socket.send(json.dumps({'status': 'error', 'message': 'BAD_CERT'}).encode())
                 client_socket.close()
                 continue
             
-            # Step 2: Diffie-Hellman key exchange
-            aes_key = perform_dh_server(client_socket)
-            print("✅ DH key exchange complete")
+            # DH for auth
+            auth_key = perform_dh_server(client_socket)
+            print("✅ Auth DH key exchange complete")
             
-            # Step 3: Receive encrypted credentials
+            # Receive encrypted auth request
             encrypted_msg = client_socket.recv(4096)
-            decrypted_data = aes_decrypt(encrypted_msg, aes_key)
+            decrypted_data = aes_decrypt(encrypted_msg, auth_key)
             auth_data = json.loads(decrypted_data.decode())
             
-            # Step 4: Handle registration or login
+            # Handle auth
             if auth_data['type'] == 'register':
                 response = handle_registration(auth_data, db_conn)
+                client_socket.send(json.dumps(response).encode())
+                client_socket.close()
             elif auth_data['type'] == 'login':
                 response = handle_login(auth_data, db_conn)
-            else:
-                response = {'status': 'error', 'message': 'Invalid request type'}
-            
-            client_socket.send(json.dumps(response).encode())
+                client_socket.send(json.dumps(response).encode())
+                
+                if response['status'] == 'success':
+                    # Post-login DH for chat session
+                    session_key = perform_dh_server(client_socket)
+                    print("✅ Chat session DH key exchange complete")
+                    
+                    # Start chat session
+                    handle_chat_session(client_socket, session_key, client_cert, server_key, response['username'])
+                
+                client_socket.close()
             
         except Exception as e:
-            print(f"❌ Error handling client: {e}")
+            print(f"❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             client_socket.close()
-            print("📴 Client disconnected\n")
 
 if __name__ == "__main__":
     start_server()
