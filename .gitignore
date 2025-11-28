@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Certs and secrets
+certs/*.key
+certs/*.pem
+certs/*.crt
+
+# DB dumps
+*.sql
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/

@@ -109,3 +109,12 @@ When submitting on Google Classroom (GCR):
 ✔ Tamper test → signature verification fails (`SIG_FAIL`)  
 ✔ Replay test → rejected by seqno (`REPLAY`)  
 ✔ Non-repudiation → exported transcript + signed SessionReceipt verified offline  
+
+## Student Work Progress
+
+- [ ] PKI scripts
+- [ ] Registration & login
+- [ ] DH key exchange
+- [ ] Encrypted chat + signatures
+- [ ] Tests & evidence
+
